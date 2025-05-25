@@ -24,13 +24,8 @@
 7. 在  `output`  会生成一个同名 `.cpp`，即为合并后的完整代码。
 
 ### 例子
-
-![1](images\1.png)
-
-![2](images\2.png)
-
-![3](images\3.png)
-
-![4](images\4.png)
-
-![5](images\5.png)
+![1](https://github.com/GladerJ/TemplateReplaceExtension/blob/main/images/1.png)
+![2](https://github.com/GladerJ/TemplateReplaceExtension/blob/main/images/2.png)
+![3](https://github.com/GladerJ/TemplateReplaceExtension/blob/main/images/3.png)
+![4](https://github.com/GladerJ/TemplateReplaceExtension/blob/main/images/4.png)
+![5](https://github.com/GladerJ/TemplateReplaceExtension/blob/main/images/5.png)
