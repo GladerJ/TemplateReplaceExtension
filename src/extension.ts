@@ -34,13 +34,7 @@ async function mergeIncludesAndGenerate(currentFilePath: string) {
     }
 
     const projectRoot = workspaceFolder.uri.fsPath;
-    const libPath = path.join(projectRoot, 'lib');
-    const mainPath = path.join(projectRoot, 'main');
     const outputPath = path.join(projectRoot, 'output');
-
-    if (!fs.existsSync(libPath) || !fs.existsSync(mainPath)) {
-        throw new Error('项目结构不正确，缺少lib或main目录');
-    }
 
     if (!fs.existsSync(outputPath)) {
         fs.mkdirSync(outputPath, { recursive: true });
@@ -50,221 +44,137 @@ async function mergeIncludesAndGenerate(currentFilePath: string) {
     const outputFilePath = path.join(outputPath, fileName);
     const originalContent = fs.readFileSync(currentFilePath, 'utf8');
 
-    const merger = new IncludeMerger(projectRoot);
-    const mergedContent = merger.mergeIncludes(originalContent, currentFilePath);
+    const merger = new IncludeMerger(projectRoot, currentFilePath);
+    const mergedContent = merger.mergeIncludes(originalContent);
 
     fs.writeFileSync(outputFilePath, mergedContent);
 }
 
 class IncludeMerger {
     private projectRoot: string;
-    private libPath: string;
-    private fileCache: Map<string, string> = new Map(); // 文件内容缓存
-    private processedFiles: Set<string> = new Set(); // 已处理的文件
-    private standardIncludes: Set<string> = new Set(); // 标准库包含
-    private usingStatements: Set<string> = new Set(); // using语句
-    private libContents: string[] = []; // lib文件内容（按依赖顺序）
+    private currentMainFile: string;
+    private fileCache: Map<string, string> = new Map();
+    private processedFiles: Set<string> = new Set();
+    private standardIncludes: Set<string> = new Set();
+    private usingStatements: Set<string> = new Set();
+    private libContents: string[] = [];
 
-    constructor(projectRoot: string) {
+    constructor(projectRoot: string, currentMainFile: string) {
         this.projectRoot = projectRoot;
-        this.libPath = path.join(projectRoot, 'lib');
+        this.currentMainFile = path.normalize(currentMainFile);
     }
 
-    mergeIncludes(content: string, filePath: string): string {
-        // 重置状态
+    mergeIncludes(content: string): string {
         this.fileCache.clear();
         this.processedFiles.clear();
         this.standardIncludes.clear();
         this.usingStatements.clear();
         this.libContents = [];
 
-        console.log('Starting merge for:', filePath);
+        this.extractTopLevelDirectives(content);
+        const mainCode = this.extractMainCode(content);
+        this.processIncludes(content, this.currentMainFile, []);
 
-        // 递归处理所有依赖
-        this.processFile(content, filePath, []);
-
-        console.log('Standard includes:', Array.from(this.standardIncludes));
-        console.log('Using statements:', Array.from(this.usingStatements));
-        console.log('Lib contents count:', this.libContents.length);
-        console.log('Processed files:', Array.from(this.processedFiles));
-
-        // 构建最终结果
         let result = '';
 
-        // 1. 添加所有标准库包含（去重后）
-        const sortedIncludes = Array.from(this.standardIncludes).sort();
-        for (const include of sortedIncludes) {
-            result += include + '\n';
+        for (const line of Array.from(this.standardIncludes).sort()) {
+            result += line + '\n';
         }
+        if (this.standardIncludes.size > 0) result += '\n';
 
-        if (sortedIncludes.length > 0) {
-            result += '\n';
+        for (const line of Array.from(this.usingStatements).sort()) {
+            result += line + '\n';
         }
+        if (this.usingStatements.size > 0) result += '\n';
 
-        // 2. 添加所有using语句（去重后）
-        const sortedUsing = Array.from(this.usingStatements).sort();
-        for (const using of sortedUsing) {
-            result += using + '\n';
-        }
-
-        if (sortedUsing.length > 0) {
-            result += '\n';
-        }
-
-        // 3. 添加lib文件内容
         for (let i = 0; i < this.libContents.length; i++) {
             result += this.libContents[i];
             if (i < this.libContents.length - 1) {
                 result += '\n';
             }
         }
+        if (this.libContents.length > 0) result += '\n';
 
-        if (this.libContents.length > 0) {
-            result += '\n';
-        }
-
-        // 4. 添加主文件代码内容
         result += '// === Main Code ===\n';
-        result += this.extractMainCode(content);
+        result += mainCode;
 
         return result;
     }
 
-    private processFile(content: string, filePath: string, dependencyStack: string[]): void {
-        const normalizedPath = path.normalize(filePath);
-        
-        // 检查循环依赖
-        if (dependencyStack.includes(normalizedPath)) {
-            throw new Error(`检测到循环依赖: ${dependencyStack.join(' -> ')} -> ${normalizedPath}`);
-        }
-
-        // 如果已经处理过，直接返回
-        if (this.processedFiles.has(normalizedPath)) {
-            return;
-        }
-
-        // 使用缓存
-        let fileContent = content;
-        if (this.fileCache.has(normalizedPath)) {
-            fileContent = this.fileCache.get(normalizedPath)!;
-        } else if (filePath !== normalizedPath || !content) {
-            if (fs.existsSync(normalizedPath)) {
-                fileContent = fs.readFileSync(normalizedPath, 'utf8');
-                this.fileCache.set(normalizedPath, fileContent);
-            } else {
-                return;
+    private extractTopLevelDirectives(content: string) {
+        const lines = content.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('#include') && this.isStandardInclude(trimmed)) {
+                this.standardIncludes.add(trimmed);
+            } else if (trimmed.startsWith('using ')) {
+                this.usingStatements.add(trimmed);
             }
+        }
+    }
+
+    private extractMainCode(content: string): string {
+        return content
+            .split('\n')
+            .filter(line => !line.trim().startsWith('#include') && !line.trim().startsWith('using '))
+            .join('\n')
+            .trim() + '\n';
+    }
+
+    private processIncludes(content: string, filePath: string, stack: string[]) {
+        const normalizedPath = path.normalize(filePath);
+
+        if (this.processedFiles.has(normalizedPath)) return;
+        if (stack.includes(normalizedPath)) {
+            throw new Error(`循环依赖：${[...stack, normalizedPath].join(' -> ')}`);
         }
 
         this.processedFiles.add(normalizedPath);
-        const newStack = [...dependencyStack, normalizedPath];
+        stack.push(normalizedPath);
 
-        const lines = fileContent.split('\n');
-        const libDependencies: string[] = [];
-        let codeContent = '';
+        const lines = content.split('\n');
+        const currentDir = path.dirname(normalizedPath);
+        let codeBody = '';
+        const dependencies: string[] = [];
 
-        // 解析文件内容
         for (const line of lines) {
             const trimmed = line.trim();
-            
-            if (trimmed.startsWith('#include')) {
-                if (this.isStandardInclude(trimmed)) {
-                    // 标准库包含
-                    this.standardIncludes.add(trimmed);
-                } else if (this.isLibInclude(trimmed)) {
-                    // lib包含 - 添加到依赖列表
-                    const libPath = this.resolveLibPath(trimmed, normalizedPath);
-                    if (libPath) {
-                        libDependencies.push(libPath);
-                    }
-                }
-            } else if (trimmed.startsWith('using ')) {
-                // using语句
-                this.usingStatements.add(trimmed);
-            } else if (trimmed !== '') {
-                // 实际代码内容
-                codeContent += line + '\n';
-            } else {
-                // 保留空行（在代码内容中）
-                if (codeContent.trim() !== '') {
-                    codeContent += '\n';
-                }
+            if (trimmed.startsWith('#include') && this.isUserInclude(trimmed)) {
+                const includePath = this.extractUserIncludePath(trimmed);
+                if (!includePath) continue;
+
+                const resolvedPath = path.resolve(currentDir, includePath);
+                if (!fs.existsSync(resolvedPath)) continue;
+
+                const realContent = fs.readFileSync(resolvedPath, 'utf8').replace(/^\s*#pragma\s+once\s*$/gm, '');
+                dependencies.push(resolvedPath);
+
+                this.processIncludes(realContent, resolvedPath, stack.slice());
+            } else if (!trimmed.startsWith('#include') && !trimmed.startsWith('using ') && trimmed !== '') {
+                codeBody += line + '\n';
+            } else if (codeBody.trim() !== '') {
+                codeBody += '\n';
             }
         }
 
-        // 先递归处理所有依赖
-        for (const depPath of libDependencies) {
-            this.processFile('', depPath, newStack);
-        }
-
-        // 如果是lib文件且有实际内容，添加到结果中
-        if (this.isLibFile(normalizedPath) && codeContent.trim()) {
-            const relativePath = path.relative(this.projectRoot, normalizedPath);
-            let libSection = `// === ${relativePath} ===\n`;
-            libSection += codeContent.trim() + '\n';
-            this.libContents.push(libSection);
+        if (normalizedPath !== this.currentMainFile && codeBody.trim()) {
+            const relative = path.relative(this.projectRoot, normalizedPath);
+            const section = `// === ${relative.replace(/\\/g, '/')} ===\n` + codeBody.trim() + '\n';
+            this.libContents.push(section);
         }
     }
 
     private isStandardInclude(line: string): boolean {
-        return line.includes('<') && line.includes('>');
+        return /#include\s*<.*>/.test(line);
     }
 
-    private isLibInclude(line: string): boolean {
-        if (!line.includes('"')) return false;
-        
-        // 匹配相对路径的include，但排除绝对路径和当前目录
+    private isUserInclude(line: string): boolean {
+        return /#include\s*".*"/.test(line);
+    }
+
+    private extractUserIncludePath(line: string): string | null {
         const match = line.match(/#include\s+"([^"]+)"/);
-        if (!match) return false;
-        
-        const includePath = match[1];
-        // 检查是否是相对路径且指向上级目录
-        return includePath.startsWith('../') || includePath.startsWith('..\\');
-    }
-
-    private isLibFile(filePath: string): boolean {
-        const normalized = path.normalize(filePath);
-        const projectNormalized = path.normalize(this.projectRoot);
-        const mainNormalized = path.normalize(path.join(this.projectRoot, 'main'));
-        
-        // 是项目内的文件，但不是main目录下的文件
-        return normalized.startsWith(projectNormalized) && !normalized.startsWith(mainNormalized);
-    }
-
-    private resolveLibPath(includeLine: string, currentFile: string): string | null {
-        const match = includeLine.match(/#include\s+"([^"]+)"/);
-        if (!match) return null;
-
-        const relativePath = match[1];
-        const currentDir = path.dirname(currentFile);
-        const resolvedPath = path.resolve(currentDir, relativePath);
-        
-        // 检查文件是否存在，并且确实是在项目目录内
-        if (fs.existsSync(resolvedPath)) {
-            const normalizedResolved = path.normalize(resolvedPath);
-            const normalizedProject = path.normalize(this.projectRoot);
-            
-            // 确保解析的路径在项目根目录内
-            if (normalizedResolved.startsWith(normalizedProject)) {
-                return normalizedResolved;
-            }
-        }
-        
-        return null;
-    }
-
-    private extractMainCode(content: string): string {
-        const lines = content.split('\n');
-        const codeLines: string[] = [];
-
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('#include') && !trimmed.startsWith('using ')) {
-                codeLines.push(line);
-            }
-        }
-
-        return codeLines.join('\n').trim() + '\n';
+        return match ? match[1] : null;
     }
 }
 
